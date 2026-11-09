@@ -2,6 +2,8 @@ name: Android APK Uretici
 
 on:
   push:
+    paths:
+      - '.github/workflows/**'
   workflow_dispatch:
 
 permissions:
@@ -14,364 +16,439 @@ jobs:
       - name: Depoyu Hazirla
         uses: actions/checkout@v4
 
-      - name: .NET 8 Kurulumu
-        uses: actions/setup-dotnet@v4
+      - name: Java 17 Hazirla
+        uses: actions/setup-java@v4
         with:
-          dotnet-version: '8.0.x'
+          distribution: 'temurin'
+          java-version: '17'
 
-      - name: Android Workload Kurulumu
-        run: dotnet workload install android
-
-      - name: Proje Dosyalarini Otomatik Olustur
+      - name: Kaynak Kodlari Olustur ve APK Derle
         run: |
-          mkdir -p Platforms/Android
+          set -e
+          export ANDROID_HOME=${ANDROID_HOME:-/usr/local/lib/android/sdk}
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME/build-tools/"* | sort -V | tail -n 1)
+          PLATFORM_DIR=$(ls -d "$ANDROID_HOME/platforms/android-"* | sort -V | tail -n 1)
+          PLATFORM_JAR="$PLATFORM_DIR/android.jar"
 
-          cat << 'EOF' > EkranKaydedici.csproj
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup>
-              <TargetFramework>net8.0-android</TargetFramework>
-              <SupportedOSPlatformVersion>29.0</SupportedOSPlatformVersion>
-              <OutputType>Exe</OutputType>
-              <Nullable>enable</Nullable>
-              <ImplicitUsings>enable</ImplicitUsings>
-              <ApplicationId>com.kaan.ekrankaydedici</ApplicationId>
-              <ApplicationVersion>1</ApplicationVersion>
-              <ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
-              <AndroidPackageFormat>apk</AndroidPackageFormat>
-              <EmbedAssembliesIntoApk>true</EmbedAssembliesIntoApk>
-            </PropertyGroup>
-          </Project>
-          EOF
+          mkdir -p src/com/kaan/ekrankaydedici build/classes
 
-          cat << 'EOF' > Platforms/Android/AndroidManifest.xml
+          cat << 'EOF' > AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.kaan.ekrankaydedici">
-            <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-            <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-            <uses-permission android:name="android.permission.RECORD_AUDIO" />
-            <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-            <application android:allowBackup="true" android:label="Ekran Kaydedici" android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="com.kaan.ekrankaydedici"
+              android:versionCode="1"
+              android:versionName="1.0">
+
+              <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+
+              <application
+                  android:label="Ekran Kaydedici"
+                  android:icon="@android:drawable/presence_video_online"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ScreenRecordService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
           </manifest>
           EOF
 
-          cat << 'EOF' > MainActivity.cs
-          using Android;
-          using Android.App;
-          using Android.Content;
-          using Android.Content.PM;
-          using Android.Graphics;
-          using Android.Hardware.Display;
-          using Android.Media;
-          using Android.Media.Projection;
-          using Android.OS;
-          using Android.Provider;
-          using Android.Util;
-          using Android.Views;
-          using Android.Widget;
+          cat << 'EOF' > src/com/kaan/ekrankaydedici/MainActivity.java
+          package com.kaan.ekrankaydedici;
 
-          namespace EkranKaydedici;
+          import android.Manifest;
+          import android.app.Activity;
+          import android.content.Intent;
+          import android.graphics.Color;
+          import android.media.projection.MediaProjectionManager;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.Switch;
+          import android.widget.TextView;
+          import android.widget.Toast;
+          import java.util.ArrayList;
 
-          [Activity(Label = "Ekran Kaydedici", MainLauncher = true, Exported = true, LaunchMode = LaunchMode.SingleTop, ConfigurationChanges = ConfigChanges.ScreenSize | ConfigChanges.Orientation)]
-          public class MainActivity : Activity
-          {
-              private const int RequestMediaProjection = 1001;
-              private const int RequestPermissionsCode = 1002;
-              private MediaProjectionManager? _projectionManager;
-              private Button? _btnAction;
-              private Switch? _swAudio;
-              private TextView? _txtStatus;
+          public class MainActivity extends Activity {
+              private static final int REQ_PROJECTION = 1001;
+              private static final int REQ_PERMS = 1002;
+              private MediaProjectionManager projectionManager;
+              private Button btnAction;
+              private Switch swAudio;
+              private TextView txtStatus;
 
-              protected override void OnCreate(Bundle? savedInstanceState)
-              {
-                  base.OnCreate(savedInstanceState);
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
 
-                  var root = new LinearLayout(this)
-                  {
-                      Orientation = Orientation.Vertical,
-                      Gravity = GravityFlags.Center
-                  };
-                  root.SetBackgroundColor(Color.ParseColor("#121212"));
-                  root.SetPadding(60, 60, 60, 60);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setBackgroundColor(Color.parseColor("#121212"));
+                  root.setPadding(60, 60, 60, 60);
 
-                  var title = new TextView(this)
-                  {
-                      Text = "Ekran Kaydedici",
-                      TextSize = 26,
-                      Gravity = GravityFlags.Center
-                  };
-                  title.SetTextColor(Color.White);
-                  title.SetPadding(0, 0, 0, 40);
+                  TextView title = new TextView(this);
+                  title.setText("Ekran Kaydedici");
+                  title.setTextSize(26);
+                  title.setTextColor(Color.WHITE);
+                  title.setGravity(Gravity.CENTER);
+                  title.setPadding(0, 0, 0, 40);
 
-                  _swAudio = new Switch(this)
-                  {
-                      Text = "Mikrofon Sesini Kaydet  ",
-                      Checked = true,
-                      TextSize = 16
-                  };
-                  _swAudio.SetTextColor(Color.LightGray);
-                  _swAudio.SetPadding(0, 0, 0, 50);
+                  swAudio = new Switch(this);
+                  swAudio.setText("Mikrofon Sesini Kaydet  ");
+                  swAudio.setChecked(true);
+                  swAudio.setTextSize(16);
+                  swAudio.setTextColor(Color.LTGRAY);
+                  swAudio.setPadding(0, 0, 0, 50);
 
-                  _btnAction = new Button(this)
-                  {
-                      Text = "KAYDI BAŞLAT (60 FPS)",
-                      TextSize = 18
-                  };
-                  _btnAction.SetBackgroundColor(Color.ParseColor("#2563EB"));
-                  _btnAction.SetTextColor(Color.White);
-                  _btnAction.SetPadding(40, 35, 40, 35);
+                  btnAction = new Button(this);
+                  btnAction.setText("KAYDI BASLAT (60 FPS)");
+                  btnAction.setTextSize(18);
+                  btnAction.setBackgroundColor(Color.parseColor("#2563EB"));
+                  btnAction.setTextColor(Color.WHITE);
+                  btnAction.setPadding(40, 35, 40, 35);
 
-                  _txtStatus = new TextView(this)
-                  {
-                      Text = "Hazır • Videolar Galeriye kaydedilir",
-                      TextSize = 14,
-                      Gravity = GravityFlags.Center
-                  };
-                  _txtStatus.SetTextColor(Color.ParseColor("#9CA3AF"));
-                  _txtStatus.SetPadding(0, 40, 0, 0);
+                  txtStatus = new TextView(this);
+                  txtStatus.setText("Hazir • Videolar Galeriye kaydedilir");
+                  txtStatus.setTextSize(14);
+                  txtStatus.setTextColor(Color.parseColor("#9CA3AF"));
+                  txtStatus.setGravity(Gravity.CENTER);
+                  txtStatus.setPadding(0, 40, 0, 0);
 
-                  root.AddView(title);
-                  root.AddView(_swAudio);
-                  root.AddView(_btnAction);
-                  root.AddView(_txtStatus);
-                  SetContentView(root);
+                  root.addView(title);
+                  root.addView(swAudio);
+                  root.addView(btnAction);
+                  root.addView(txtStatus);
+                  setContentView(root);
 
-                  _projectionManager = (MediaProjectionManager?)GetSystemService(MediaProjectionService);
-                  CheckAndRequestPermissions();
+                  projectionManager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                  checkPerms();
 
-                  _btnAction.Click += (s, e) =>
-                  {
-                      if (!ScreenRecordService.IsRecording)
-                      {
-                          StartActivityForResult(_projectionManager!.CreateScreenCaptureIntent(), RequestMediaProjection);
+                  btnAction.setOnClickListener(new View.OnClickListener() {
+                      @Override
+                      public void onClick(View v) {
+                          if (!ScreenRecordService.isRecording) {
+                              startActivityForResult(projectionManager.createScreenCaptureIntent(), REQ_PROJECTION);
+                          } else {
+                              stopService(new Intent(MainActivity.this, ScreenRecordService.class));
+                              updateUI(false);
+                              Toast.makeText(MainActivity.this, "Video Galeriye (Filmler) kaydedildi!", Toast.LENGTH_LONG).show();
+                          }
                       }
-                      else
-                      {
-                          StopService(new Intent(this, typeof(ScreenRecordService)));
-                          UpdateUI(false);
-                          Toast.MakeText(this, "Video Galeriye (Filmler) kaydedildi!", ToastLength.Long)?.Show();
+                  });
+
+                  updateUI(ScreenRecordService.isRecording);
+              }
+
+              @Override
+              protected void onResume() {
+                  super.onResume();
+                  updateUI(ScreenRecordService.isRecording);
+              }
+
+              private void checkPerms() {
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      ArrayList<String> perms = new ArrayList<String>();
+                      perms.add(Manifest.permission.RECORD_AUDIO);
+                      if (Build.VERSION.SDK_INT >= 33) {
+                          perms.add("android.permission.POST_NOTIFICATIONS");
                       }
-                  };
-
-                  UpdateUI(ScreenRecordService.IsRecording);
-              }
-
-              protected override void OnResume()
-              {
-                  base.OnResume();
-                  UpdateUI(ScreenRecordService.IsRecording);
-              }
-
-              private void CheckAndRequestPermissions()
-              {
-                  var perms = new List<string> { Manifest.Permission.RecordAudio };
-                  if (Build.VERSION.SdkInt >= BuildVersionCodes.Tiramisu)
-                      perms.Add(Manifest.Permission.PostNotifications);
-
-                  RequestPermissions(perms.ToArray(), RequestPermissionsCode);
-              }
-
-              protected override void OnActivityResult(int requestCode, Result resultCode, Intent? data)
-              {
-                  if (requestCode == RequestMediaProjection && resultCode == Result.Ok && data != null)
-                  {
-                      var serviceIntent = new Intent(this, typeof(ScreenRecordService));
-                      serviceIntent.PutExtra("resultCode", (int)resultCode);
-                      serviceIntent.PutExtra("data", data);
-                      serviceIntent.PutExtra("recordAudio", _swAudio!.Checked);
-
-                      if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
-                          StartForegroundService(serviceIntent);
-                      else
-                          StartService(serviceIntent);
-
-                      UpdateUI(true);
+                      requestPermissions(perms.toArray(new String[0]), REQ_PERMS);
                   }
               }
 
-              private void UpdateUI(bool recording)
-              {
-                  if (_btnAction == null || _txtStatus == null || _swAudio == null) return;
-                  if (recording)
-                  {
-                      _btnAction.Text = "KAYDI DURDUR VE KAYDET";
-                      _btnAction.SetBackgroundColor(Color.ParseColor("#DC2626"));
-                      _txtStatus.Text = "Kaydediliyor... Uygulamayı alta alabilirsin.";
-                      _swAudio.Enabled = false;
-                  }
-                  else
-                  {
-                      _btnAction.Text = "KAYDI BAŞLAT (60 FPS)";
-                      _btnAction.SetBackgroundColor(Color.ParseColor("#2563EB"));
-                      _txtStatus.Text = "Hazır • Videolar Galeriye kaydedilir";
-                      _swAudio.Enabled = true;
+              @Override
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+                  if (requestCode == REQ_PROJECTION && resultCode == RESULT_OK && data != null) {
+                      Intent serviceIntent = new Intent(this, ScreenRecordService.class);
+                      serviceIntent.putExtra("resultCode", resultCode);
+                      serviceIntent.putExtra("data", data);
+                      serviceIntent.putExtra("recordAudio", swAudio.isChecked());
+
+                      if (Build.VERSION.SDK_INT >= 26) {
+                          startForegroundService(serviceIntent);
+                      } else {
+                          startService(serviceIntent);
+                      }
+                      updateUI(true);
                   }
               }
-          }
 
-          [Service(ForegroundServiceType = ForegroundService.TypeMediaProjection, Exported = false)]
-          public class ScreenRecordService : Service
-          {
-              public static bool IsRecording { get; private set; }
-              private MediaProjectionManager? _projectionManager;
-              private MediaProjection? _mediaProjection;
-              private MediaRecorder? _mediaRecorder;
-              private VirtualDisplay? _virtualDisplay;
-              private ParcelFileDescriptor? _pfd;
-
-              public override IBinder? OnBind(Intent? intent) => null;
-
-              public override StartCommandResult OnStartCommand(Intent? intent, StartCommandFlags flags, int startId)
-              {
-                  if (intent == null) return StartCommandResult.NotSticky;
-
-                  if (intent.Action == "STOP_ACTION")
-                  {
-                      StopCapture();
-                      StopForeground(StopForegroundFlags.Remove);
-                      StopSelf();
-                      Toast.MakeText(this, "Video Galeriye kaydedildi!", ToastLength.Long)?.Show();
-                      return StartCommandResult.NotSticky;
+              private void updateUI(boolean recording) {
+                  if (btnAction == null) return;
+                  if (recording) {
+                      btnAction.setText("KAYDI DURDUR VE KAYDET");
+                      btnAction.setBackgroundColor(Color.parseColor("#DC2626"));
+                      txtStatus.setText("Kaydediliyor... Uygulamayi alta alabilirsin.");
+                      swAudio.setEnabled(false);
+                  } else {
+                      btnAction.setText("KAYDI BASLAT (60 FPS)");
+                      btnAction.setBackgroundColor(Color.parseColor("#2563EB"));
+                      txtStatus.setText("Hazir • Videolar Galeriye kaydedilir");
+                      swAudio.setEnabled(true);
                   }
-
-                  CreateNotificationAndStartForeground();
-
-                  int resultCode = intent.GetIntExtra("resultCode", (int)Result.Canceled);
-                  var data = intent.GetParcelableExtra("data") as Intent;
-                  bool recordAudio = intent.GetBooleanExtra("recordAudio", true);
-
-                  if (data != null)
-                  {
-                      _projectionManager = (MediaProjectionManager?)GetSystemService(MediaProjectionService);
-                      _mediaProjection = _projectionManager!.GetMediaProjection(resultCode, data);
-                      _mediaProjection.RegisterCallback(new ProjectionCallback(this), new Handler(Looper.MainLooper!));
-                      StartCapture(recordAudio);
-                  }
-
-                  return StartCommandResult.Sticky;
-              }
-
-              private void CreateNotificationAndStartForeground()
-              {
-                  string channelId = "ekran_kayit_kanali";
-                  var manager = (NotificationManager?)GetSystemService(NotificationService);
-
-                  if (Build.VERSION.SdkInt >= BuildVersionCodes.O)
-                  {
-                      var channel = new NotificationChannel(channelId, "Ekran Kayıt Servisi", NotificationImportance.Low);
-                      manager?.CreateNotificationChannel(channel);
-                  }
-
-                  var stopIntent = new Intent(this, typeof(ScreenRecordService));
-                  stopIntent.SetAction("STOP_ACTION");
-                  var stopPendingIntent = PendingIntent.GetService(this, 0, stopIntent, PendingIntentFlags.Immutable);
-
-                  var openIntent = new Intent(this, typeof(MainActivity));
-                  var openPendingIntent = PendingIntent.GetActivity(this, 0, openIntent, PendingIntentFlags.Immutable);
-
-                  var notification = new Notification.Builder(this, channelId)
-                      .SetContentTitle("Ekran Kaydediliyor (60 FPS)")
-                      .SetContentText("Durdurmak için dokunun veya bildirimdeki butonu kullanın.")
-                      .SetSmallIcon(Android.Resource.Drawable.PresenceVideoOnline)
-                      .SetContentIntent(openPendingIntent)
-                      .AddAction(new Notification.Action.Builder(Android.Resource.Drawable.IcMediaPause, "Kaydı Durdur", stopPendingIntent).Build())
-                      .SetOngoing(true)
-                      .Build();
-
-                  if (Build.VERSION.SdkInt >= BuildVersionCodes.Q)
-                      StartForeground(101, notification, ForegroundService.TypeMediaProjection);
-                  else
-                      StartForeground(101, notification);
-              }
-
-              private void StartCapture(bool recordAudio)
-              {
-                  var wm = (IWindowManager?)GetSystemService(WindowService);
-                  var metrics = new DisplayMetrics();
-                  wm?.DefaultDisplay?.GetRealMetrics(metrics);
-
-                  int width = (metrics.WidthPixels / 16) * 16;
-                  int height = (metrics.HeightPixels / 16) * 16;
-                  int density = (int)metrics.DensityDpi;
-
-                  var values = new ContentValues();
-                  values.Put(MediaStore.MediaColumns.DisplayName, $"EkranKaydi_{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
-                  values.Put(MediaStore.MediaColumns.MimeType, "video/mp4");
-                  values.Put(MediaStore.MediaColumns.RelativePath, "Movies/EkranKayitlari");
-
-                  var uri = ContentResolver!.Insert(MediaStore.Video.Media.ExternalContentUri!, values);
-                  _pfd = ContentResolver.OpenFileDescriptor(uri!, "rw");
-
-                  _mediaRecorder = new MediaRecorder();
-                  if (recordAudio) _mediaRecorder.SetAudioSource(AudioSource.Mic);
-                  _mediaRecorder.SetVideoSource(VideoSource.Surface);
-                  _mediaRecorder.SetOutputFormat(OutputFormat.Mpeg4);
-                  _mediaRecorder.SetVideoEncoder(VideoEncoder.H264);
-                  if (recordAudio)
-                  {
-                      _mediaRecorder.SetAudioEncoder(AudioEncoder.Aac);
-                      _mediaRecorder.SetAudioEncodingBitRate(128000);
-                      _mediaRecorder.SetAudioSamplingRate(44100);
-                  }
-                  _mediaRecorder.SetVideoSize(width, height);
-                  _mediaRecorder.SetVideoFrameRate(60);
-                  _mediaRecorder.SetVideoEncodingBitRate(10 * 1000 * 1000);
-                  _mediaRecorder.SetOutputFile(_pfd!.FileDescriptor);
-                  _mediaRecorder.Prepare();
-
-                  _virtualDisplay = _mediaProjection!.CreateVirtualDisplay(
-                      "ScreenRecorderDisplay",
-                      width, height, density,
-                      DisplayFlags.AutoMirror,
-                      _mediaRecorder.Surface, null, null
-                  );
-
-                  _mediaRecorder.Start();
-                  IsRecording = true;
-              }
-
-              public override void OnDestroy()
-              {
-                  StopCapture();
-                  base.OnDestroy();
-              }
-
-              public void StopCapture()
-              {
-                  if (!IsRecording) return;
-                  IsRecording = false;
-
-                  try { _mediaRecorder?.Stop(); } catch { }
-                  _mediaRecorder?.Reset();
-                  _mediaRecorder?.Release();
-                  _mediaRecorder = null;
-
-                  _virtualDisplay?.Release();
-                  _virtualDisplay = null;
-
-                  _mediaProjection?.Stop();
-                  _mediaProjection = null;
-
-                  _pfd?.Close();
-                  _pfd = null;
-              }
-
-              private class ProjectionCallback : MediaProjection.Callback
-              {
-                  private readonly ScreenRecordService _service;
-                  public ProjectionCallback(ScreenRecordService service) => _service = service;
-                  public override void OnStop() => _service.StopSelf();
               }
           }
           EOF
 
-      - name: APK Derle ve Imzala
-        run: dotnet publish EkranKaydedici.csproj -f net8.0-android -c Release -o bin/Publish
+          cat << 'EOF' > src/com/kaan/ekrankaydedici/ScreenRecordService.java
+          package com.kaan.ekrankaydedici;
 
-      - name: Dogrudan Indirilebilir APK Yayinla (Releases)
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.ContentValues;
+          import android.content.Intent;
+          import android.content.pm.PackageManager;
+          import android.content.pm.ServiceInfo;
+          import android.hardware.display.DisplayManager;
+          import android.hardware.display.VirtualDisplay;
+          import android.media.MediaRecorder;
+          import android.media.projection.MediaProjection;
+          import android.media.projection.MediaProjectionManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.ParcelFileDescriptor;
+          import android.provider.MediaStore;
+          import android.util.DisplayMetrics;
+          import android.view.WindowManager;
+          import android.widget.Toast;
+
+          public class ScreenRecordService extends Service {
+              public static boolean isRecording = false;
+              private MediaProjection mediaProjection;
+              private MediaRecorder mediaRecorder;
+              private VirtualDisplay virtualDisplay;
+              private ParcelFileDescriptor pfd;
+
+              @Override
+              public IBinder onBind(Intent intent) {
+                  return null;
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent == null) return START_NOT_STICKY;
+
+                  if ("STOP_ACTION".equals(intent.getAction())) {
+                      stopCapture();
+                      stopForeground(true);
+                      stopSelf();
+                      Toast.makeText(this, "Video Galeriye kaydedildi!", Toast.LENGTH_LONG).show();
+                      return START_NOT_STICKY;
+                  }
+
+                  startForegroundNotification();
+
+                  int resultCode = intent.getIntExtra("resultCode", Activity.RESULT_CANCELED);
+                  Intent data = intent.getParcelableExtra("data");
+                  boolean recordAudio = intent.getBooleanExtra("recordAudio", true);
+
+                  if (data != null) {
+                      MediaProjectionManager pm = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+                      mediaProjection = pm.getMediaProjection(resultCode, data);
+                      mediaProjection.registerCallback(new MediaProjection.Callback() {
+                          @Override
+                          public void onStop() {
+                              stopSelf();
+                          }
+                      }, new Handler(Looper.getMainLooper()));
+                      startCapture(recordAudio);
+                  }
+
+                  return START_STICKY;
+              }
+
+              private void startForegroundNotification() {
+                  String channelId = "ekran_kayit_kanali";
+                  NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel channel = new NotificationChannel(channelId, "Ekran Kayit Servisi", NotificationManager.IMPORTANCE_LOW);
+                      nm.createNotificationChannel(channel);
+                  }
+
+                  Intent stopIntent = new Intent(this, ScreenRecordService.class);
+                  stopIntent.setAction("STOP_ACTION");
+                  PendingIntent stopPi = PendingIntent.getService(this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  Intent openIntent = new Intent(this, MainActivity.class);
+                  PendingIntent openPi = PendingIntent.getActivity(this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+
+                  Notification.Builder builder = Build.VERSION.SDK_INT >= 26
+                          ? new Notification.Builder(this, channelId)
+                          : new Notification.Builder(this);
+
+                  Notification notification = builder
+                          .setContentTitle("Ekran Kaydediliyor (60 FPS)")
+                          .setContentText("Durdurmak icin dokunun veya bildirimdeki butonu kullanin.")
+                          .setSmallIcon(android.R.drawable.presence_video_online)
+                          .setContentIntent(openPi)
+                          .addAction(new Notification.Action.Builder(android.R.drawable.ic_media_pause, "Kaydi Durdur", stopPi).build())
+                          .setOngoing(true)
+                          .build();
+
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(101, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+                  } else {
+                      startForeground(101, notification);
+                  }
+              }
+
+              private void startCapture(boolean recordAudio) {
+                  try {
+                      WindowManager wm = (WindowManager) getSystemService(WINDOW_SERVICE);
+                      DisplayMetrics metrics = new DisplayMetrics();
+                      wm.getDefaultDisplay().getRealMetrics(metrics);
+
+                      int rawWidth = metrics.widthPixels;
+                      int rawHeight = metrics.heightPixels;
+                      if (rawWidth > 1080) {
+                          rawHeight = (int) ((float) rawHeight * (1080f / rawWidth));
+                          rawWidth = 1080;
+                      }
+                      int width = (rawWidth / 16) * 16;
+                      int height = (rawHeight / 16) * 16;
+                      int density = metrics.densityDpi;
+
+                      boolean hasAudioPerm = true;
+                      if (Build.VERSION.SDK_INT >= 23) {
+                          hasAudioPerm = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+                      }
+                      boolean useAudio = recordAudio && hasAudioPerm;
+
+                      ContentValues values = new ContentValues();
+                      values.put(MediaStore.MediaColumns.DISPLAY_NAME, "EkranKaydi_" + System.currentTimeMillis() + ".mp4");
+                      values.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          values.put("relative_path", "Movies/EkranKayitlari");
+                      }
+
+                      Uri uri = getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+                      pfd = getContentResolver().openFileDescriptor(uri, "rw");
+
+                      mediaRecorder = new MediaRecorder();
+                      if (useAudio) {
+                          mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+                      }
+                      mediaRecorder.setVideoSource(MediaRecorder.VideoSource.SURFACE);
+                      mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+                      mediaRecorder.setVideoEncoder(MediaRecorder.VideoEncoder.H264);
+                      if (useAudio) {
+                          mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+                          mediaRecorder.setAudioEncodingBitRate(128000);
+                          mediaRecorder.setAudioSamplingRate(44100);
+                      }
+                      mediaRecorder.setVideoSize(width, height);
+                      mediaRecorder.setVideoFrameRate(60);
+                      mediaRecorder.setVideoEncodingBitRate(8 * 1000 * 1000);
+                      mediaRecorder.setOutputFile(pfd.getFileDescriptor());
+                      mediaRecorder.prepare();
+
+                      virtualDisplay = mediaProjection.createVirtualDisplay(
+                              "ScreenRecorderDisplay",
+                              width, height, density,
+                              DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                              mediaRecorder.getSurface(), null, null
+                      );
+
+                      mediaRecorder.start();
+                      isRecording = true;
+                  } catch (Exception e) {
+                      Toast.makeText(this, "Kayit hatasi: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                      stopSelf();
+                  }
+              }
+
+              @Override
+              public void onDestroy() {
+                  stopCapture();
+                  super.onDestroy();
+              }
+
+              private void stopCapture() {
+                  if (!isRecording) return;
+                  isRecording = false;
+
+                  try {
+                      if (mediaRecorder != null) mediaRecorder.stop();
+                  } catch (Exception ignored) {}
+
+                  if (mediaRecorder != null) {
+                      mediaRecorder.reset();
+                      mediaRecorder.release();
+                      mediaRecorder = null;
+                  }
+                  if (virtualDisplay != null) {
+                      virtualDisplay.release();
+                      virtualDisplay = null;
+                  }
+                  if (mediaProjection != null) {
+                      mediaProjection.stop();
+                      mediaProjection = null;
+                  }
+                  try {
+                      if (pfd != null) {
+                          pfd.close();
+                          pfd = null;
+                      }
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF
+
+          # 1. Manifest paketle
+          "$BUILD_TOOLS/aapt2" link -o unaligned.apk -I "$PLATFORM_JAR" --manifest AndroidManifest.xml
+
+          # 2. Java kodlarini derle ve DEX'e cevir
+          javac -encoding UTF-8 -source 8 -target 8 -classpath "$PLATFORM_JAR" -d build/classes src/com/kaan/ekrankaydedici/*.java
+          "$BUILD_TOOLS/d8" --lib "$PLATFORM_JAR" --output . build/classes/com/kaan/ekrankaydedici/*.class
+
+          # 3. DEX dosyasini APK icine ekle ve hizala
+          zip -uj unaligned.apk classes.dex
+          "$BUILD_TOOLS/zipalign" -f -p 4 unaligned.apk aligned.apk
+
+          # 4. Imza anahtari olustur ve APK'yi imzala
+          keytool -genkeypair -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android,O=Android,C=TR"
+          "$BUILD_TOOLS/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android --out EkranKaydedici.apk aligned.apk
+
+      - name: APK Dosyasini Depoya ve Releases Kisminda Yayinla
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          APK_FILE=$(find bin/Publish -name "*-Signed.apk" | head -n 1)
-          cp "$APK_FILE" EkranKaydedici.apk
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f EkranKaydedici.apk
+          git commit -m "Hazir APK eklendi [skip ci]" || true
+          git push || true
           gh release delete v1.0 --yes --repo ${{ github.repository }} || true
-          gh release create v1.0 EkranKaydedici.apk --title "Ekran Kaydedici APK v1.0" --notes "Aşağıdaki EkranKaydedici.apk dosyasına dokunarak doğrudan telefonunuza indirip kurabilirsiniz." --repo ${{ github.repository }}
+          gh release create v1.0 EkranKaydedici.apk --title "Ekran Kaydedici APK v1.0" --notes "EkranKaydedici.apk dosyasina dokunarak indirip kurabilirsiniz." --repo ${{ github.repository }}
